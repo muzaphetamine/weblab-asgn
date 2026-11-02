@@ -1,390 +1,216 @@
 const book = document.getElementById("book");
-const cover = document.getElementById("frontCover");
-const closeButton = document.getElementById("closeBook");
+const frontCover = document.getElementById("frontCover");
+const closeBtn = document.getElementById("closeBook");
+const backCover = book.querySelector(".back-cover");
+const pageDivs = Array.from(book.querySelectorAll(".page"));
 
-let isOpen = false;
-let isAnimating = false;
-let flippedCount = 0;
+// ---------- 2. SETTINGS / STATE ----------
+const Z_STEP = 2;                 // px gap between stacked sheets (prevents overlap flicker)
+const COVER_TIME = 1300;          // ms - matches the cover transition in the CSS
+const STAGGER = 150;              // ms delay between pages when closing the book
 
-const sheets = [];
-
-
-/* =========================================
-   1. TIMING
-========================================= */
-
-function getDuration(variable, fallback) {
-    const value = getComputedStyle(book)
-        .getPropertyValue(variable)
-        .trim();
-
-    if (value.endsWith("ms")) return parseFloat(value);
-    if (value.endsWith("s")) return parseFloat(value) * 1000;
-
-    return fallback;
+// Read --turn-time (e.g. ".9s") from the CSS so JS and CSS stay in sync
+function getTurnTime() {
+    const raw = getComputedStyle(book).getPropertyValue("--turn-time").trim();
+    if (raw.endsWith("ms")) return parseFloat(raw);
+    if (raw.endsWith("s")) return parseFloat(raw) * 1000;
+    return 900; // fallback
 }
+const TURN_TIME = getTurnTime();
 
-const TURN_MS = getDuration("--turn-time", 900);
-const COVER_MS = getDuration("--cover-time", 1300);
+let sheets = [];                  // all sheet elements, in order
+let totalSheets = 0;
+let currentPage = 0;              // how many sheets are flipped to the left
+let isOpen = false;
+let isBusy = false;               // blocks clicks while an animation is running
 
+// ---------- 3. BUILD SHEETS FROM THE .page DIVS ----------
+// Creates one face (front or back) containing the image.
+// If the image fails to load, a styled placeholder is shown instead.
+function createFace(className, imgEl, pageNumber) {
+    const face = document.createElement("div");
+    face.className = "sheet-face " + className;
 
-/* =========================================
-   2. CREATE PAGE CONTENT
-========================================= */
-
-function createPageContent(src, pageNumber) {
     const content = document.createElement("div");
     content.className = "page-content";
 
-    const placeholder = document.createElement("div");
-    placeholder.className = "page-placeholder";
-
-    const number = document.createElement("span");
-    number.className = "number";
-    number.textContent = String(pageNumber).padStart(2, "0");
-
-    const title = document.createElement("span");
-    title.className = "placeholder-title";
-    title.textContent = "YOUR MEMORIES";
-
-    const footer = document.createElement("span");
-    footer.className = "placeholder-footer";
-    footer.textContent = "MY IMAGE GALLERY";
-
-    placeholder.append(number, title, footer);
-    content.appendChild(placeholder);
-
-    if (src) {
-        const img = document.createElement("img");
-
-        img.alt = `Gallery page ${pageNumber}`;
-        img.draggable = false;
-
-        img.onload = () => {
-            placeholder.style.display = "none";
-        };
-
-        img.onerror = () => {
-            img.remove();
-        };
-
-        img.src = src;
-        content.appendChild(img);
+    if (imgEl) {
+        imgEl.draggable = false;
+        imgEl.addEventListener("error", () => {
+            content.innerHTML = "";
+            content.appendChild(createPlaceholder(pageNumber));
+        });
+        content.appendChild(imgEl);
+    } else {
+        content.appendChild(createPlaceholder(pageNumber));
     }
 
-    return content;
+    face.appendChild(content);
+    return face;
 }
 
-
-/* =========================================
-   3. BUILD PHYSICAL SHEETS
-========================================= */
-
-// Each HTML .page represents ONE physical sheet.
-// First image = front.
-// Second image = back.
-
-const htmlPages = [
-    ...book.querySelectorAll(":scope > .page")
-];
-
-htmlPages.forEach((page, index) => {
-    const images = page.querySelectorAll(":scope > img");
-
-    const frontSrc = images[0]?.getAttribute("src") || null;
-    const backSrc = images[1]?.getAttribute("src") || null;
-
-    const sheet = document.createElement("div");
-    sheet.className = "sheet";
-
-    // FRONT FACE
-    const front = document.createElement("div");
-    front.className = "sheet-face sheet-front";
-
-    front.appendChild(
-        createPageContent(frontSrc, index * 2 + 1)
-    );
-
-    // BACK FACE
-    const back = document.createElement("div");
-    back.className = "sheet-face sheet-back";
-
-    back.appendChild(
-        createPageContent(backSrc, index * 2 + 2)
-    );
-
-    sheet.append(front, back);
-
-    sheets.push(sheet);
-
-    // Remove original HTML page.
-    page.remove();
-});
-
-
-/* =========================================
-   4. PAGE STACK
-========================================= */
-
-const stack = document.createElement("div");
-stack.className = "page-stack";
-
-sheets.forEach(sheet => {
-    stack.appendChild(sheet);
-});
-
-
-/* =========================================
-   5. PAGE CLICK AREAS
-========================================= */
-
-const leftClick = document.createElement("button");
-
-leftClick.className = "page-click left";
-leftClick.type = "button";
-leftClick.setAttribute("aria-label", "Previous page");
-
-const rightClick = document.createElement("button");
-
-rightClick.className = "page-click right";
-rightClick.type = "button";
-rightClick.setAttribute("aria-label", "Next page");
-
-stack.append(leftClick, rightClick);
-
-book.appendChild(stack);
-
-
-/* =========================================
-   6. SHEET DEPTH MANAGEMENT
-========================================= */
-
-function rightDepth(index) {
-    return 1 + (sheets.length - index) * 0.15;
+// Placeholder shown when an image is missing (uses the .page-placeholder CSS)
+function createPlaceholder(pageNumber) {
+    const ph = document.createElement("div");
+    ph.className = "page-placeholder";
+    ph.innerHTML =
+        '<span class="number">' + pageNumber + "</span>" +
+        '<span class="placeholder-title">IMAGE NOT FOUND</span>' +
+        '<span class="placeholder-footer">MY IMAGE GALLERY</span>';
+    return ph;
 }
 
-function leftDepth(index) {
-    return 5 + index * 0.15;
-}
+function buildSheets() {
+    pageDivs.forEach((pageDiv, i) => {
+        const imgs = pageDiv.querySelectorAll("img");
 
-function setSheetDepth(sheet, depth) {
-    sheet.style.setProperty("--z", `${depth}px`);
-}
+        const sheet = document.createElement("div");
+        sheet.className = "sheet";
 
-function resetSheetDepths() {
-    sheets.forEach((sheet, index) => {
-        setSheetDepth(sheet, rightDepth(index));
+        // Front face = page number 2i+1, back face = page number 2i+2
+        sheet.appendChild(createFace("sheet-front", imgs[0], i * 2 + 1));
+        sheet.appendChild(createFace("sheet-back", imgs[1], i * 2 + 2));
+
+        // Put the new sheet where the old .page div was, then remove the old one
+        book.insertBefore(sheet, pageDiv);
+        pageDiv.remove();
+        sheets.push(sheet);
     });
+    totalSheets = sheets.length;
 }
 
-resetSheetDepths();
+// ---------- 4. STACKING ORDER (z-index in 3D) ----------
+// Un-flipped sheets: first sheet is on top of the pile (highest z).
+// Flipped sheets:    last flipped sheet is on top (highest z).
+function zUnflipped(i) { return (totalSheets - i) * Z_STEP; }
+function zFlipped(i) { return (i + 1) * Z_STEP; }
 
+function setSheetZ(i, z) { sheets[i].style.setProperty("--z", z + "px"); }
+function setCoverZ(z) { frontCover.style.setProperty("--z", z + "px"); }
 
-/* =========================================
-   7. ANIMATION HELPER
-========================================= */
-
-function waitForRotation(element, duration) {
-    return new Promise(resolve => {
-        let finished = false;
-
-        function finish(event) {
-            if (finished) return;
-
-            if (
-                event &&
-                (
-                    event.target !== element ||
-                    event.propertyName !== "rotate"
-                )
-            ) {
-                return;
-            }
-
-            finished = true;
-
-            clearTimeout(timer);
-
-            element.removeEventListener(
-                "transitionend",
-                finish
-            );
-
-            resolve();
-        }
-
-        const timer = setTimeout(
-            () => finish(),
-            duration + 150
-        );
-
-        element.addEventListener(
-            "transitionend",
-            finish
-        );
-    });
+function initStacking() {
+    sheets.forEach((_, i) => setSheetZ(i, zUnflipped(i)));
+    setCoverZ((totalSheets + 2) * Z_STEP);   // cover sits on top when closed
 }
 
+// ---------- 5. TURNING ONE PAGE ----------
+function turnForward() {
+    if (currentPage >= totalSheets) return;       // already at the end
+    const i = currentPage;
+    const sheet = sheets[i];
 
-/* =========================================
-   8. OPEN BOOK
-========================================= */
+    sheet.classList.add("flipped", "turning");
+    // Change z only at the halfway point, when the sheet is edge-on,
+    // so the swap is invisible to the viewer.
+    setTimeout(() => setSheetZ(i, zFlipped(i)), TURN_TIME / 2);
+    setTimeout(() => sheet.classList.remove("turning"), TURN_TIME);
 
-async function openBook() {
-    if (isOpen || isAnimating) return;
-
-    isOpen = true;
-    isAnimating = true;
-
-    closeButton.classList.add("visible");
-
-    const animation = waitForRotation(
-        cover,
-        COVER_MS
-    );
-
-    // Move book to centre and rotate cover.
-    book.classList.add("open");
-
-    await animation;
-
-    // Reveal pages only after cover finishes opening.
-    book.classList.add("opened");
-
-    isAnimating = false;
+    currentPage++;
 }
 
-cover.addEventListener("click", openBook);
+function turnBackward() {
+    if (currentPage <= 0) return;                 // nothing to go back to
+    const i = currentPage - 1;
+    const sheet = sheets[i];
 
-
-/* =========================================
-   9. CLOSE BOOK
-========================================= */
-
-async function closeBook() {
-    if (!isOpen || isAnimating) return;
-
-    isOpen = false;
-    isAnimating = true;
-
-    closeButton.classList.remove("visible");
-
-    // Hide pages before closing cover.
-    book.classList.remove("opened");
-
-    // Reset every sheet.
-    sheets.forEach(sheet => {
-        sheet.classList.remove("flipped", "turning");
-        sheet.style.rotate = "y 0deg";
-    });
-
-    flippedCount = 0;
-
-    resetSheetDepths();
-
-    const animation = waitForRotation(
-        cover,
-        COVER_MS
-    );
-
-    book.classList.remove("open");
-
-    await animation;
-
-    isAnimating = false;
-}
-
-closeButton.addEventListener("click", closeBook);
-
-
-/* =========================================
-   10. FLIP FORWARD
-========================================= */
-
-async function nextPage() {
-    if (!isOpen || isAnimating) return;
-
-    if (flippedCount >= sheets.length) return;
-
-    isAnimating = true;
-
-    const index = flippedCount;
-    const sheet = sheets[index];
-
-    // Bring active sheet above the others.
-    setSheetDepth(sheet, 30);
-
-    sheet.classList.add("turning");
-
-    // Register starting state.
-    void sheet.offsetWidth;
-
-    const animation = waitForRotation(
-        sheet,
-        TURN_MS
-    );
-
-    // Rotate sheet to the left.
-    sheet.classList.add("flipped");
-
-    await animation;
-
-    sheet.classList.remove("turning");
-
-    // Settle on the left stack.
-    setSheetDepth(sheet, leftDepth(index));
-
-    flippedCount++;
-
-    isAnimating = false;
-}
-
-
-/* =========================================
-   11. FLIP BACKWARD
-========================================= */
-
-async function previousPage() {
-    if (!isOpen || isAnimating) return;
-
-    if (flippedCount <= 0) return;
-
-    isAnimating = true;
-
-    const index = flippedCount - 1;
-    const sheet = sheets[index];
-
-    // Bring active sheet above the others.
-    setSheetDepth(sheet, 30);
-
-    sheet.classList.add("turning");
-
-    void sheet.offsetWidth;
-
-    const animation = waitForRotation(
-        sheet,
-        TURN_MS
-    );
-
-    // Rotate sheet back to the right.
     sheet.classList.remove("flipped");
+    sheet.classList.add("turning");
+    setTimeout(() => setSheetZ(i, zUnflipped(i)), TURN_TIME / 2);
+    setTimeout(() => sheet.classList.remove("turning"), TURN_TIME);
 
-    await animation;
-
-    sheet.classList.remove("turning");
-
-    setSheetDepth(sheet, rightDepth(index));
-
-    flippedCount--;
-
-    isAnimating = false;
+    currentPage--;
 }
 
+// Public versions with the "busy" lock so users can't spam-click
+function nextPage() {
+    if (!isOpen || isBusy || currentPage >= totalSheets) return;
+    isBusy = true;
+    turnForward();
+    setTimeout(() => (isBusy = false), TURN_TIME);
+}
 
-/* =========================================
-   12. CONNECT INTERACTIONS
-========================================= */
+function prevPage() {
+    if (!isOpen || isBusy) return;
+    if (currentPage === 0) {          // on the first spread -> go back to closed book
+        closeBook();
+        return;
+    }
+    isBusy = true;
+    turnBackward();
+    setTimeout(() => (isBusy = false), TURN_TIME);
+}
 
-leftClick.addEventListener("click", previousPage);
+// ---------- 6. OPEN / CLOSE THE BOOK ----------
+function openBook() {
+    if (isOpen || isBusy) return;
+    isBusy = true;
+    isOpen = true;
 
-rightClick.addEventListener("click", nextPage);
+    book.classList.add("open");       // CSS flips the cover and centres the book
+    closeBtn.classList.add("visible");
+
+    // Drop the cover's z once it's edge-on so it ends up under the left pages
+    setTimeout(() => setCoverZ(0), COVER_TIME / 2);
+    setTimeout(() => (isBusy = false), COVER_TIME);
+}
+
+function closeBook() {
+    if (!isOpen || isBusy) return;
+    isBusy = true;
+    closeBtn.classList.remove("visible");
+
+    // Step 1: flip every turned page back, one after another
+    const pagesToReturn = currentPage;
+    for (let k = 0; k < pagesToReturn; k++) {
+        setTimeout(turnBackward, k * STAGGER);
+    }
+
+    // Step 2: once the last page is back, close the cover
+    const waitForPages = pagesToReturn > 0
+        ? (pagesToReturn - 1) * STAGGER + TURN_TIME
+        : 0;
+
+    setTimeout(() => {
+        book.classList.remove("open");
+        isOpen = false;
+        // Bring cover back on top once it's edge-on again
+        setTimeout(() => setCoverZ((totalSheets + 2) * Z_STEP), COVER_TIME / 2);
+        setTimeout(() => (isBusy = false), COVER_TIME);
+    }, waitForPages);
+}
+
+// ---------- 7. EVENT LISTENERS ----------
+// Clicks on the book
+book.addEventListener("click", (e) => {
+    // Closed book: only the front cover opens it
+    if (!isOpen) {
+        if (e.target.closest("#frontCover")) openBook();
+        return;
+    }
+
+    // Open book: left half = previous, right half = next
+    const rect = book.getBoundingClientRect();
+    const clickedLeftHalf = e.clientX < rect.left + rect.width / 2;
+    clickedLeftHalf ? prevPage() : nextPage();
+});
+
+// Close button
+closeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeBook();
+});
+
+// Keyboard controls
+document.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight") {
+        isOpen ? nextPage() : openBook();
+    } else if (e.key === "ArrowLeft") {
+        prevPage();
+    } else if (e.key === "Escape") {
+        closeBook();
+    }
+});
+
+// ---------- 8. START ----------
+buildSheets();
+initStacking();
